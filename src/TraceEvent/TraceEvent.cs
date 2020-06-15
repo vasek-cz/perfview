@@ -3513,7 +3513,8 @@ namespace Microsoft.Diagnostics.Tracing
                             Debug.Assert(curTemplate.taskGuid == eventRecord->EventHeader.ProviderId);
                             if (curTemplate.lookupAsWPP)
                             {
-                                Debug.Assert((ushort)curTemplate.eventID == eventRecord->EventHeader.Id);
+                                Debug.Assert((ushort)curTemplate.eventID == eventRecord->EventHeader.Id ||
+                                             (byte)curTemplate.opcode == eventRecord->EventHeader.Opcode);
                             }
                             else
                             {

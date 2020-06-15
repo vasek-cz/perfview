@@ -1019,6 +1019,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         }
 
         private static readonly Regex paramReplacer = new Regex(@"%(\d+)", RegexOptions.Compiled);
+        private static readonly Regex sysValuesReplacer = new Regex(@"%sys\.(\d+)!", RegexOptions.Compiled);
 
         public override string GetFormattedMessage(IFormatProvider formatProvider)
         {
@@ -1027,6 +1028,32 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 return base.GetFormattedMessage(formatProvider);
             }
 
+            MessageFormat = sysValuesReplacer.Replace(MessageFormat, delegate(Match m)
+            {
+                if (int.TryParse(m.Groups[1].Value, out int sysFieldId))
+                {
+                    switch (sysFieldId)
+                    {
+                        case 2:
+                            return EventName;
+
+                        case 3:
+                            return ThreadID.ToString();
+
+                        case 4:
+                            return TimeStamp.ToString();
+
+                        case 8:
+                            return ProcessID.ToString();
+
+                        case 9:
+                            return ProcessorNumber.ToString();
+                    }
+                }
+
+                return $"<<BadSysField:{m.Groups[1].Value}>>";
+            });
+
             // TODO is this error handling OK?  
             // Replace all %N with the string value for that parameter.  
             return paramReplacer.Replace(MessageFormat, delegate (Match m)
@@ -1034,12 +1061,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 int targetIndex = int.Parse(m.Groups[1].Value) - 1;
 
                 // for some array and string values, we remove the length field.  Account
-                // for that when we are resolving the %X qualifers by searching up from
+                // for that when we are resolving the %X qualifiers by searching up from
                 // 0 adjusting along the way for removed fields.  
                 int index = 0;
                 for (int fixedIndex = 0; fixedIndex < payloadFetches.Length; fixedIndex++)
                 {
-                    // This field is the length field that was removed from the payloafFetches array. 
+                    // This field is the length field that was removed from the payloadFetches array. 
                     if (DynamicTraceEventData.ConsumesFields(payloadFetches[fixedIndex].Size))
                     {
                         if (index == targetIndex)
@@ -1069,7 +1096,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
 
                     index++;
                 }
-                return "<<BadFieldIdx>>";
+                return $"<<BadFieldIdx:{targetIndex}>>";
             });
         }
         #endregion

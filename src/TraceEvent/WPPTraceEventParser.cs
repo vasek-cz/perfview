@@ -2,6 +2,7 @@
 using Microsoft.Diagnostics.Utilities;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -45,11 +46,13 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 {
                     var templates = CreateTemplatesForTMFFile(taskGuid, tmfPath);
 
+                    var expected = unknownEvent.eventID == 0 ? (TraceEventID)unknownEvent.Opcode : unknownEvent.eventID;
+
                     // Register all the templates in the file, and if we found the specific one we are looking for return that one. 
                     DynamicTraceEventData ret = null;
                     foreach (var template in templates)
                     {
-                        if (template.eventID == unknownEvent.eventID)
+                        if (template.eventID == expected)
                         {
                             ret = template;
                         }
@@ -93,7 +96,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         private List<DynamicTraceEventData> CreateTemplatesForTMFFile(Guid taskGuid, string tmfPath)
         {
             List<DynamicTraceEventData> templates = new List<DynamicTraceEventData>();
-            List<TypeAndFormat> parameterTypes = new List<TypeAndFormat>();
+            List<DynamicTraceEventData> currentTemplates = new List<DynamicTraceEventData>();
 
             using (StreamReader tmfData = File.OpenText(tmfPath))
             {
@@ -107,6 +110,11 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                     if (line == null)
                     {
                         break;
+                    }
+
+                    if (line.Length == 0)
+                    {
+                        continue;
                     }
 
                     if (providerGuid == Guid.Empty)
@@ -161,13 +169,18 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                     else
                     {
                         // #typev  ttstracing_cpp78 13 "%0%10!s! Error happens in Initializing %11!s!!" //   LEVEL=TRACE_LEVEL_ERROR FLAGS=TTS_Trace_Engine_Initialization FUNC=CTTSTracingHelper::LogComponentInitialization
-                        m = Regex.Match(line, "^#typev\\s+(\\S*?)(\\d+)\\s+(\\d+)\\s+\"(.*)\"(.*)");
+                        m = Regex.Match(line, "^#typev\\s+(\\S*?)(\\d*)\\s+(\\d+)\\s+\"(.*)\"(.*)");
                         if (m.Success)
                         {
                             var fileName = m.Groups[1].Value;
-                            var lineNum = int.Parse(m.Groups[2].Value);
                             var eventId = int.Parse(m.Groups[3].Value);
                             var formatStr = m.Groups[4].Value;
+                            var eventName = fileName;
+
+                            if (m.Groups[2].Length > 0)
+                            {
+                                eventName += "/" + m.Groups[2].Value;
+                            }
 
                             // Substitute in %!NAME! for their values as defined in the tail  
                             if (formatStr.Contains("%!"))
@@ -199,135 +212,181 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                                 eventProviderName = providerName + "/" + eventProviderName;
                             }
 
-                            var template = new DynamicTraceEventData(null, eventId, 0, fileName + "/" + m.Groups[2].Value, taskGuid, 0, "", providerGuid, eventProviderName);
+                            var template = new DynamicTraceEventData(null, eventId, 0, eventName, taskGuid, 0, "", providerGuid, eventProviderName);
                             template.lookupAsWPP = true;                // Use WPP lookup conventions. 
-
-                            parameterTypes.Clear();
-
-                            for (; ; )
-                            {
-                                line = tmfData.ReadLine();
-                                if (line == null)
-                                {
-                                    break;
-                                }
-
-                                if (line.Trim() == "}")
-                                {
-                                    break;
-                                }
-                                // szPOSHeader, ItemString -- 10
-                                m = Regex.Match(line, @"^.*, Item(\S+) -- (\d+)$");
-                                if (m.Success)
-                                {
-                                    var typeStr = m.Groups[1].Value;
-                                    Type type = null;
-                                    IDictionary<long, string> map = null;
-                                    if (typeStr == "String")
-                                    {
-                                        type = typeof(StringBuilder);       // We use StringBuild to represent a ANSI string 
-                                    }
-                                    else if (typeStr == "WString")
-                                    {
-                                        type = typeof(string);
-                                    }
-                                    else if (typeStr == "Long" || typeStr == "Ulong")
-                                    {
-                                        type = typeof(int);
-                                    }
-                                    else if (typeStr == "HRESULT" || typeStr == "NTSTATUS")
-                                    {
-                                        type = typeof(int);
-                                        // By making map non-null we indicate that this is a enum, but we don't add any enum
-                                        // mappings, which makes it print as Hex.  Thus we are just saying 'print as hex'  
-                                        map = new SortedDictionary<long, string>();
-                                    }
-                                    else if (typeStr == "Double")
-                                    {
-                                        type = typeof(double);
-                                    }
-                                    else if (typeStr == "Ptr")
-                                    {
-                                        type = typeof(IntPtr);
-                                    }
-                                    else if (typeStr.StartsWith("Enum("))       // TODO more support for enums 
-                                    {
-                                        type = typeof(int);
-                                    }
-                                    else if (typeStr == "ULongLong" || typeStr.StartsWith("LongLong"))
-                                    {
-                                        type = typeof(long);
-                                    }
-                                    else if (typeStr == "ListLong(false,true)")
-                                    {
-                                        type = typeof(bool);
-                                    }
-                                    else if (typeStr.StartsWith("ListLong("))
-                                    {
-                                        type = typeof(int);
-                                    }
-                                    else if (typeStr == "Guid")
-                                    {
-                                        type = typeof(Guid);
-                                    }
-
-                                    if (type != null)
-                                    {
-                                        parameterTypes.Add(new TypeAndFormat(type, map));
-                                    }
-                                }
-                            }
-                            template.payloadNames = new string[parameterTypes.Count];
-                            template.payloadFetches = new DynamicTraceEventData.PayloadFetch[parameterTypes.Count];
-                            ushort offset = 0;
-                            for (int i = 0; i < parameterTypes.Count; i++)
-                            {
-                                template.payloadNames[i] = "Arg" + (i + 1).ToString();
-                                template.payloadFetches[i].Offset = offset;
-                                var type = parameterTypes[i].Type;
-                                template.payloadFetches[i].Map = parameterTypes[i].Map;
-                                ushort size = 0;
-                                if (type == typeof(StringBuilder))  // This mean ANSI_STRING (I just need a distinct type)
-                                {
-                                    type = typeof(string);
-                                    size |= DynamicTraceEventData.IS_ANSI;
-                                }
-                                size |= DynamicTraceEventData.SizeOfType(type);
-                                template.payloadFetches[i].Size = size;
-                                template.payloadFetches[i].Type = type;
-
-                                if (size >= DynamicTraceEventData.SPECIAL_SIZES || offset == ushort.MaxValue)
-                                {
-                                    offset = ushort.MaxValue;           // Indicate that the offset must be computed at run time.
-                                }
-                                else
-                                {
-                                    offset += size;
-                                }
-                            }
-
-                            formatStr = formatStr.Replace("%0", "");    // TODO What is this?  Why is it here?  
-                            formatStr = Regex.Replace(formatStr, @"%(\d+)!(\w?)\w*!", delegate (Match match)
-                            {
-                                var argNum = int.Parse(match.Groups[1].Value) - 10;     // 0 first arg ...
-
-                                // If it has a !x qualifer after it change th map so it will be decoded as hex.  
-                                if (match.Groups[2].Value == "x" && 0 <= argNum && argNum < template.payloadFetches.Length &&
-                                    template.payloadFetches[argNum].Map == null)
-                                {
-                                    template.payloadFetches[argNum].Map = new SortedDictionary<long, string>();
-                                }
-
-                                return "%" + (argNum + 1).ToString();
-                            });
                             template.MessageFormat = formatStr;
 
-                            templates.Add(template);
+                            currentTemplates.Add(template);
+                        } 
+                        else if (line.Trim() == "{")
+                        {
+                            LoadAttributes(tmfData, currentTemplates);
+
+                            templates.AddRange(currentTemplates);
+
+                            currentTemplates.Clear();
                         }
                     }
                 }
             }
+
             return templates;
+        }
+
+        private void LoadAttributes(StreamReader tmfData, IEnumerable<DynamicTraceEventData> templates)
+        {
+            var parameterTypes = new List<TypeAndFormat>();
+
+            for (; ; )
+            {
+                string line = tmfData.ReadLine();
+
+                if (line == null)
+                {
+                    break;
+                }
+
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+
+                if (line.Trim() == "}")
+                {
+                    break;
+                }
+
+                // szPOSHeader, ItemString -- 10
+                Match m = Regex.Match(line, @"^.*,?\s+Item(\S+)\s+(?:-|\/){2}\s+(\d+)$");
+                if (m.Success)
+                {
+                    var typeStr = m.Groups[1].Value;
+                    Type type = null;
+                    IDictionary<long, string> map = null;
+                    if (typeStr == "String")
+                    {
+                        type = typeof(StringBuilder);       // We use StringBuild to represent a ANSI string 
+                    }
+                    else if (typeStr == "WString")
+                    {
+                        type = typeof(string);
+                    }
+                    else if (typeStr == "Long" || typeStr == "Ulong")
+                    {
+                        type = typeof(int);
+                    }
+                    else if (typeStr == "HRESULT" || typeStr == "NTSTATUS")
+                    {
+                        type = typeof(int);
+                        // By making map non-null we indicate that this is a enum, but we don't add any enum
+                        // mappings, which makes it print as Hex.  Thus we are just saying 'print as hex'  
+                        map = new SortedDictionary<long, string>();
+                    }
+                    else if (typeStr == "Double")
+                    {
+                        type = typeof(double);
+                    }
+                    else if (typeStr == "Ptr")
+                    {
+                        type = typeof(IntPtr);
+                    }
+                    else if (typeStr.StartsWith("Enum("))       // TODO more support for enums 
+                    {
+                        type = typeof(int);
+                    }
+                    else if (typeStr == "ULongLong" || typeStr.StartsWith("LongLong"))
+                    {
+                        type = typeof(long);
+                    }
+                    else if (typeStr == "ListLong(false,true)")
+                    {
+                        type = typeof(bool);
+                    }
+                    else if (typeStr.StartsWith("ListLong("))
+                    {
+                        type = typeof(int);
+                    }
+                    else if (typeStr == "Guid")
+                    {
+                        type = typeof(Guid);
+                    }
+                    else if (typeStr == "Timestamp")
+                    {
+                        type = typeof(DateTime);
+                    }
+
+                    if (type != null)
+                    {
+                        parameterTypes.Add(new TypeAndFormat(type, map));
+                    }
+                }
+            }
+
+            foreach (var template in templates)
+            {
+                template.payloadNames = new string[parameterTypes.Count];
+                template.payloadFetches = new DynamicTraceEventData.PayloadFetch[parameterTypes.Count];
+                ushort offset = 0;
+                for (int i = 0; i < parameterTypes.Count; i++)
+                {
+                    template.payloadNames[i] = "Arg" + (i + 1).ToString();
+                    template.payloadFetches[i].Offset = offset;
+                    var type = parameterTypes[i].Type;
+                    template.payloadFetches[i].Map = parameterTypes[i].Map;
+                    ushort size = 0;
+                    if (type == typeof(StringBuilder)) // This mean ANSI_STRING (I just need a distinct type)
+                    {
+                        type = typeof(string);
+                        size |= DynamicTraceEventData.IS_ANSI;
+                    }
+
+                    size |= DynamicTraceEventData.SizeOfType(type);
+                    template.payloadFetches[i].Size = size;
+                    template.payloadFetches[i].Type = type;
+
+                    if (size >= DynamicTraceEventData.SPECIAL_SIZES || offset == ushort.MaxValue)
+                    {
+                        offset = ushort.MaxValue; // Indicate that the offset must be computed at run time.
+                    }
+                    else
+                    {
+                        offset += size;
+                    }
+                }
+
+                PreprocessMessageFormat(template);
+            }
+        }
+
+        private void PreprocessMessageFormat(DynamicTraceEventData template)
+        {
+            string formatStr = template.MessageFormat;
+            
+            formatStr = formatStr.Replace("%\"", "\"");
+            formatStr = Regex.Replace(formatStr, @"%(\d+)(?:!(-?\w?)\w*!)?", delegate (Match match)
+            {
+                var argNum = int.Parse(match.Groups[1].Value);
+
+                // Arguments 0-9 are system values
+                if (argNum < 10)
+                {
+                    return $"%sys.{argNum}!";
+                }
+
+                // 10 is first custom attribute
+                argNum -= 10;
+
+                // If it has a !x qualifier after it change the map so it will be decoded as hex.  
+                if (match.Groups[2].Value == "x" && argNum < template.payloadFetches.Length &&
+                    template.payloadFetches[argNum].Map == null)
+                {
+                    template.payloadFetches[argNum].Map = new SortedDictionary<long, string>();
+                }
+
+                return "%" + (argNum + 1);
+            });
+
+            template.MessageFormat = formatStr;
         }
 
         private string m_TMFDirectory;
