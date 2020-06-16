@@ -1038,16 +1038,16 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                             return EventName;
 
                         case 3:
-                            return ThreadID.ToString();
+                            return ThreadID.ToString(formatProvider);
 
                         case 4:
-                            return TimeStamp.ToString();
+                            return TimeStamp.ToString(formatProvider);
 
                         case 8:
-                            return ProcessID.ToString();
+                            return ProcessID.ToString(formatProvider);
 
                         case 9:
-                            return ProcessorNumber.ToString();
+                            return ProcessorNumber.ToString(formatProvider);
                     }
                 }
 
